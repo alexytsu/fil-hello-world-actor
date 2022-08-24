@@ -1,13 +1,12 @@
 mod blockstore;
 
 use crate::blockstore::Blockstore;
-use cid::multihash::Code;
-use cid::Cid;
-use fvm_ipld_encoding::tuple::{Deserialize_tuple, Serialize_tuple};
-use fvm_ipld_encoding::{to_vec, CborStore, RawBytes, DAG_CBOR};
+use fil_fungible_token::token::state::TokenState;
+use fvm_ipld_encoding::{to_vec, RawBytes, DAG_CBOR};
 use fvm_sdk as sdk;
 use fvm_sdk::NO_DATA_BLOCK_ID;
 use fvm_shared::ActorID;
+use sdk::sself;
 
 /// A macro to abort concisely.
 /// This should be part of the SDK as it's very handy.
@@ -18,48 +17,6 @@ macro_rules! abort {
             Some(format!($msg, $($ex,)*).as_str()),
         )
     };
-}
-
-/// The state object.
-#[derive(Serialize_tuple, Deserialize_tuple, Clone, Debug, Default)]
-pub struct State {
-    pub count: u64,
-}
-
-/// We should probably have a derive macro to mark an object as a state object,
-/// and have load and save methods automatically generated for them as part of a
-/// StateObject trait (i.e. impl StateObject for State).
-impl State {
-    pub fn load() -> Self {
-        // First, load the current state root.
-        let root = match sdk::sself::root() {
-            Ok(root) => root,
-            Err(err) => abort!(USR_ILLEGAL_STATE, "failed to get root: {:?}", err),
-        };
-
-        // Load the actor state from the state tree.
-        match Blockstore.get_cbor::<Self>(&root) {
-            Ok(Some(state)) => state,
-            Ok(None) => abort!(USR_ILLEGAL_STATE, "state does not exist"),
-            Err(err) => abort!(USR_ILLEGAL_STATE, "failed to get state: {}", err),
-        }
-    }
-
-    pub fn save(&self) -> Cid {
-        let serialized = match to_vec(self) {
-            Ok(s) => s,
-            Err(err) => abort!(USR_SERIALIZATION, "failed to serialize state: {:?}", err),
-        };
-        let cid = match sdk::ipld::put(Code::Blake2b256.into(), 32, DAG_CBOR, serialized.as_slice())
-        {
-            Ok(cid) => cid,
-            Err(err) => abort!(USR_SERIALIZATION, "failed to store initial state: {:}", err),
-        };
-        if let Err(err) = sdk::sself::set_root(&cid) {
-            abort!(USR_ILLEGAL_STATE, "failed to set root ciid: {:}", err);
-        }
-        cid
-    }
 }
 
 /// The actor's WASM entrypoint. It takes the ID of the parameters block,
@@ -104,26 +61,16 @@ pub fn constructor() -> Option<RawBytes> {
         abort!(USR_FORBIDDEN, "constructor invoked by non-init actor");
     }
 
-    let state = State::default();
-    state.save();
+    let blockstore = Blockstore {};
+    let token_state = TokenState::new(&blockstore).unwrap();
+    let cid = token_state.save(&blockstore).unwrap();
+    sself::set_root(&cid).unwrap();
+
     None
 }
 
 /// Method num 2.
 pub fn say_hello() -> Option<RawBytes> {
-    let mut state = State::load();
-    state.count += 1;
-    state.save();
-
-    let ret = to_vec(format!("Hello world #{}!", &state.count).as_str());
-    match ret {
-        Ok(ret) => Some(RawBytes::new(ret)),
-        Err(err) => {
-            abort!(
-                USR_ILLEGAL_STATE,
-                "failed to serialize return value: {:?}",
-                err
-            );
-        }
-    }
+    let ret = to_vec(format!("Hello world!").as_str()).unwrap();
+    Some(RawBytes::new(ret))
 }
